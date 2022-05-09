@@ -1,6 +1,7 @@
 package main
 
 import (
+	//"strconv"
 	"bufio"
 	"bytes"
 	crypto_rand "crypto/rand"
@@ -29,7 +30,8 @@ var fwdDestination = flag.String("destination", "", "Destination of the forwarde
 var fwdPerc = flag.Float64("percentage", 100, "Must be between 0 and 100.")
 var fwdBy = flag.String("percentage-by", "", "Can be empty. Otherwise, valid values are: header, remoteaddr.")
 var fwdHeader = flag.String("percentage-by-header", "", "If percentage-by is header, then specify the header here.")
-var reqPort = flag.Int("filter-request-port", 80, "Must be between 0 and 65535.")
+var reqPort = flag.Int("filter-request-port", 8080, "Must be between 0 and 65535.")
+var xInterface = flag.String("interface", "vxlan0", "Network interface.")
 
 // Build a simple HTTP request parser using tcpassembly.StreamFactory and tcpassembly.Stream interfaces
 
@@ -59,17 +61,71 @@ func (h *httpStream) run() {
 	for {
 		req, err := http.ReadRequest(buf)
 		if err == io.EOF {
-			// We must read until we see an EOF... very important!
+			log.Println("Stream EOF")
 			return
 		} else if err != nil {
 			log.Println("Error reading stream", h.net, h.transport, ":", err)
 		} else {
 			reqSourceIP := h.net.Src().String()
 			reqDestionationPort := h.transport.Dst().String()
-			body, bErr := ioutil.ReadAll(req.Body)
-			if bErr != nil {
+
+			// bodyBytes := tcpreader.DiscardBytesToEOF(req.Body)
+			// fmt.Println(bodyBytes)
+
+			/*
+			originalLen, err := strconv.Atoi(req.Header.Get("Content-Length"))
+
+			if err != nil {
+				log.Println("Invalid content lenght")
+				log.Println(err)
 				return
 			}
+
+			all := make([]byte, 0)
+
+			if originalLen > 0 {
+				for {
+					tmp := make([]byte, 256, 256)
+
+					n, err := req.Body.Read(tmp)
+
+					log.Printf("Readed %d bytes...\n", n)
+
+					all = append(all, tmp[:n]...)
+
+					if err == io.EOF {
+						log.Println("Good body EOF")
+						break
+					}
+
+					if err != nil && err != io.EOF {
+						log.Printf("Unexpected body EOF: %s\n", err)
+
+						if err.Error() == "unexpected EOF" {
+							log.Println("Wait for magic...")
+						} else {
+							return
+						}
+					}
+
+					if len(all) >= originalLen {
+						break
+					}
+				}
+			}
+
+			if len(all)!= originalLen {
+				log.Println("Body len mismatch")
+				return
+			}
+			*/
+
+			body, bErr := ioutil.ReadAll(req.Body)
+			if bErr != nil {
+				log.Println("Error reading body", ":", bErr)
+				return
+			}
+
 			req.Body.Close()
 			go forwardRequest(req, reqSourceIP, reqDestionationPort, body)
 		}
@@ -77,7 +133,6 @@ func (h *httpStream) run() {
 }
 
 func forwardRequest(req *http.Request, reqSourceIP string, reqDestionationPort string, body []byte) {
-
 	// if percentage flag is not 100, then a percentage of requests is skipped
 	if *fwdPerc != 100 {
 		var uintForSeed uint64
@@ -116,6 +171,7 @@ func forwardRequest(req *http.Request, reqSourceIP string, reqDestionationPort s
 
 	// create a new url from the raw RequestURI sent by the client
 	url := fmt.Sprintf("%s%s", string(*fwdDestination), req.RequestURI)
+	log.Printf("New url %s\n", url)
 
 	// create a new HTTP request
 	forwardReq, err := http.NewRequest(req.Method, url, bytes.NewReader(body))
@@ -149,9 +205,11 @@ func forwardRequest(req *http.Request, reqSourceIP string, reqDestionationPort s
 	httpClient := &http.Client{}
 	resp, rErr := httpClient.Do(forwardReq)
 	if rErr != nil {
-		// log.Println("Forward request error", ":", err)
+		log.Println("Forward request error", ":", err)
 		return
 	}
+
+	log.Printf("%s, body size = %d\n", url, len(body))
 
 	defer resp.Body.Close()
 }
@@ -195,12 +253,11 @@ func main() {
 
 	// Set up pcap packet capture
 	log.Printf("Starting capture on interface vxlan0")
-	handle, err = pcap.OpenLive("vxlan0", 8951, true, pcap.BlockForever)
+	handle, err = pcap.OpenLive(*xInterface, 8951, true, pcap.BlockForever)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Set up BPF filter
 	BPFFilter := fmt.Sprintf("%s%d", "tcp and dst port ", *reqPort)
 	if err := handle.SetBPFFilter(BPFFilter); err != nil {
 		log.Fatal(err)
@@ -218,8 +275,9 @@ func main() {
 	ticker := time.Tick(time.Minute)
 
 	//Open a TCP Client, for NLB Health Checks only
-	go openTCPClient()
+	//go openTCPClient()
 
+	log.Println("Starting loop")
 	for {
 		select {
 		case packet := <-packets:
@@ -233,7 +291,6 @@ func main() {
 			}
 			tcp := packet.TransportLayer().(*layers.TCP)
 			assembler.AssembleWithTimestamp(packet.NetworkLayer().NetworkFlow(), tcp, packet.Metadata().Timestamp)
-
 		case <-ticker:
 			// Every minute, flush connections that haven't seen activity in the past 1 minute.
 			assembler.FlushOlderThan(time.Now().Add(time.Minute * -1))
