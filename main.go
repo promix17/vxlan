@@ -32,6 +32,7 @@ var fwdBy = flag.String("percentage-by", "", "Can be empty. Otherwise, valid val
 var fwdHeader = flag.String("percentage-by-header", "", "If percentage-by is header, then specify the header here.")
 var reqPort = flag.Int("filter-request-port", 8080, "Must be between 0 and 65535.")
 var xInterface = flag.String("interface", "vxlan0", "Network interface.")
+var xShard = flag.String("shard", "", "Mirror /2 of the traffic to the another shard")
 
 // Build a simple HTTP request parser using tcpassembly.StreamFactory and tcpassembly.Stream interfaces
 
@@ -68,57 +69,6 @@ func (h *httpStream) run() {
 		} else {
 			reqSourceIP := h.net.Src().String()
 			reqDestionationPort := h.transport.Dst().String()
-
-			// bodyBytes := tcpreader.DiscardBytesToEOF(req.Body)
-			// fmt.Println(bodyBytes)
-
-			/*
-			originalLen, err := strconv.Atoi(req.Header.Get("Content-Length"))
-
-			if err != nil {
-				log.Println("Invalid content lenght")
-				log.Println(err)
-				return
-			}
-
-			all := make([]byte, 0)
-
-			if originalLen > 0 {
-				for {
-					tmp := make([]byte, 256, 256)
-
-					n, err := req.Body.Read(tmp)
-
-					log.Printf("Readed %d bytes...\n", n)
-
-					all = append(all, tmp[:n]...)
-
-					if err == io.EOF {
-						log.Println("Good body EOF")
-						break
-					}
-
-					if err != nil && err != io.EOF {
-						log.Printf("Unexpected body EOF: %s\n", err)
-
-						if err.Error() == "unexpected EOF" {
-							log.Println("Wait for magic...")
-						} else {
-							return
-						}
-					}
-
-					if len(all) >= originalLen {
-						break
-					}
-				}
-			}
-
-			if len(all)!= originalLen {
-				log.Println("Body len mismatch")
-				return
-			}
-			*/
 
 			body, bErr := ioutil.ReadAll(req.Body)
 			if bErr != nil {
@@ -290,6 +240,30 @@ func main() {
 				continue
 			}
 			tcp := packet.TransportLayer().(*layers.TCP)
+
+			if *xShard != "" {
+				log.Printf("Sharding by src port %d\n", tcp.SrcPort)
+
+				if tcp.SrcPort % 3 == 0 {
+					log.Println("Send a packet to another shard")
+
+
+					handle2, err := pcap.OpenLive(*xShard, 1024*10, false, 30 * time.Second)
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					err = handle2.WritePacketData(packet.Data())
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					handle2.Close()
+
+					break
+				}
+			}
+
 			assembler.AssembleWithTimestamp(packet.NetworkLayer().NetworkFlow(), tcp, packet.Metadata().Timestamp)
 		case <-ticker:
 			// Every minute, flush connections that haven't seen activity in the past 1 minute.
